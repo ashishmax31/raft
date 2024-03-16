@@ -176,7 +176,6 @@ func (r *replicator) replicate(fromIndex int, toIndex int, term int32) {
 }
 
 func (r *replicator) replicateF(ctx context.Context, fromIndex int, toIndex int, currentTerm int32) int {
-	// When the stop channel is closed, we need to return from all the recursive calls.
 	defer r.leader.Log("exiting replicate func. peer: %d", r.peerIndex)
 	if !r.leader.IsLeader() || fromIndex == 0 {
 		return REPLICATE_EXIT

@@ -26,7 +26,10 @@ type RaftElectionInstance interface {
 	LastLogTerm() int32
 	LogLength() int
 	SetTerm(int32) int32
-	StateManager
+	SendElectionRunningAck()
+	ReleaseElectionRunningFlag()
+	TransitionToLeader(term int)
+	TransitionToFollower(info string)
 }
 
 type leaderElectionManager struct {

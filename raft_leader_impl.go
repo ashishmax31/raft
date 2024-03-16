@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"sort"
+	"sync"
 )
 
 var _ RaftLeader = (*Raft)(nil)
@@ -33,7 +34,7 @@ func (rf *Raft) SendHeartBeat(forTerm int32, toPeer int) {
 	}
 }
 
-func (rf *Raft) SendAppendEntry(ctx context.Context, peer int, from int, to int, currentTerm int32) (int, *AppendEntryExtras) {
+func (rf *Raft) SendAppendEntry(ctx context.Context, peer int, from int, to int, currentTerm int32) (ReplicationStatus, *AppendEntryExtras) {
 	replyChan := make(chan bool)
 	reply := &AppendEntriesReply{}
 	go func() {
@@ -133,4 +134,69 @@ func replicatedToAllNodes(ind int, matchIndexSlice []int) bool {
 		}
 	}
 	return true
+}
+
+// logReplicationState stores the leaders log replication state
+// info like nextIndex, matchIndex.
+type logReplicationState struct {
+	mu         sync.RWMutex
+	peerSize   int
+	nextIndex  []int
+	matchIndex []int
+}
+
+type LogReplicationState interface {
+	NextIndex(forPeer int) int
+	MatchIndex(forPeer int) int
+	SetMatchIndex(peerIndex int, value int)
+	SetNextIndex(peerIndex int, value int)
+	MatchIndexCopy() []int
+	ResetLogReplicationState()
+}
+
+func NewLogReplicationState(peerSize int) LogReplicationState {
+	return &logReplicationState{
+		peerSize:   peerSize,
+		nextIndex:  make([]int, peerSize),
+		matchIndex: make([]int, peerSize),
+	}
+}
+
+func (rf *logReplicationState) MatchIndexCopy() []int {
+	rf.mu.RLock()
+	defer rf.mu.RUnlock()
+	res := make([]int, 0)
+	res = append(res, rf.matchIndex...)
+	return res
+}
+
+func (rf *logReplicationState) ResetLogReplicationState() {
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+	rf.nextIndex = make([]int, rf.peerSize)
+	rf.matchIndex = make([]int, rf.peerSize)
+}
+
+func (rf *logReplicationState) NextIndex(forPeer int) int {
+	rf.mu.RLock()
+	defer rf.mu.RUnlock()
+	return rf.nextIndex[forPeer]
+}
+
+func (rf *logReplicationState) MatchIndex(forPeer int) int {
+	rf.mu.RLock()
+	defer rf.mu.RUnlock()
+	return rf.matchIndex[forPeer]
+}
+
+func (rf *logReplicationState) SetMatchIndex(peerIndex int, value int) {
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+	rf.matchIndex[peerIndex] = value
+}
+
+func (rf *logReplicationState) SetNextIndex(peerIndex int, value int) {
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+	rf.nextIndex[peerIndex] = value
 }

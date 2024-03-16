@@ -30,7 +30,10 @@ import (
 	"github.com/google/uuid"
 )
 
-var leaderTickerDuration = time.Duration(250 * time.Millisecond)
+const (
+	DEBUG                = false
+	leaderTickerDuration = time.Duration(250 * time.Millisecond)
+)
 
 type ApplyMsg struct {
 	CommandValid bool
@@ -358,7 +361,7 @@ func Make(peers []RaftPeer, me int,
 		stopElectionChan: make(chan struct{}),
 		killedChan:       make(chan struct{}),
 		applyCh:          applyCh,
-		debug:            false,
+		debug:            DEBUG,
 	}
 
 	stopLeaderChan := make(chan struct{})

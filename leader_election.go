@@ -44,15 +44,15 @@ func NewElectionManager(instance RaftElectionInstance) *leaderElectionManager {
 
 func (mgr *leaderElectionManager) RunElection(KilledChan chan struct{}, stopElectionChan chan struct{}) {
 	mgr.raftInstance.SendElectionRunningAck()
-	ctx, cancelFn := context.WithCancel(context.Background())
-	defer cancelFn()
-	electionResult := mgr.runElection(ctx, KilledChan, stopElectionChan, cancelFn)
+	electionResult := mgr.runElection(KilledChan, stopElectionChan)
 	mgr.raftInstance.ReleaseElectionRunningFlag()
 	switch electionResult {
 	case ELECTION_WON:
 		mgr.raftInstance.TransitionToLeader(int(mgr.raftInstance.GetCurrentTerm()))
 		return
 	case ELECTION_EXIT:
+		// Just exit, dont tranistion to any particular state.
+		// What this means is that the peer is already tranistioning to a follower or the peer has been killed.
 		return
 	case ELECTION_TIMEOUT:
 		mgr.raftInstance.TransitionToFollower(fmt.Sprintf("from election timeout [%s]from candidate with term: %d", mgr.raftInstance.GetCandidateID(), mgr.raftInstance.GetCurrentTerm()))
@@ -63,7 +63,8 @@ func (mgr *leaderElectionManager) RunElection(KilledChan chan struct{}, stopElec
 	}
 }
 
-func (mgr *leaderElectionManager) runElection(ctx context.Context, stopElectionChan chan struct{}, killedChan chan struct{}, cancelFn func()) int {
+func (mgr *leaderElectionManager) runElection(stopElectionChan chan struct{}, killedChan chan struct{}) int {
+	ctx, cancelFn := context.WithCancel(context.Background())
 	defer cancelFn()
 	timeoutDuration := getElectionTimeoutDuration()
 	timer := time.NewTimer(timeoutDuration)
@@ -95,6 +96,7 @@ func (mgr *leaderElectionManager) runElection(ctx context.Context, stopElectionC
 		}
 	}
 
+	// Already has one vote since the candidate voted for itself.
 	votesReceived := 1
 	for {
 		if votesReceived > len(peers)/2 {

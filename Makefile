@@ -7,7 +7,7 @@ test-2c: ARGS=2C
 
 test test-2a test-2b test-2c:
 ifdef RACE
-	go test -v -race ./test -run "$(ARGS)"
+	go test -count=1 -v -race ./test -run "$(ARGS)"
 else
-	go test -v ./test -run "$(ARGS)"
+	go test  -count=1 -v ./test -run "$(ARGS)"
 endif

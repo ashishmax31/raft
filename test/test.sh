@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # Define the test command
-TEST_COMMAND="go test -run ^TestBackup2B"
+TEST_COMMAND="go test -run 2C"
 # Initialize iteration counter
 iterations=0 
 

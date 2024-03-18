@@ -28,7 +28,7 @@ type RaftElectionInstance interface {
 	SetTerm(int32) int32
 	SendElectionRunningAck()
 	ReleaseElectionRunningFlag()
-	TransitionToLeader(term int)
+	TransitionToLeader(info string)
 	TransitionToFollower(info string)
 }
 
@@ -48,7 +48,7 @@ func (mgr *leaderElectionManager) RunElection(KilledChan chan struct{}, stopElec
 	mgr.raftInstance.ReleaseElectionRunningFlag()
 	switch electionResult {
 	case ELECTION_WON:
-		mgr.raftInstance.TransitionToLeader(int(mgr.raftInstance.GetCurrentTerm()))
+		mgr.raftInstance.TransitionToLeader(string(mgr.raftInstance.GetCurrentTerm()))
 		return
 	case ELECTION_EXIT:
 		// Just exit, dont tranistion to any particular state.

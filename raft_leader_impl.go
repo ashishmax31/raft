@@ -7,6 +7,10 @@ import (
 	"sync"
 )
 
+const (
+	BatchSize = 20
+)
+
 var _ RaftLeader = (*Raft)(nil)
 
 func (rf *Raft) LeaderID() int {
@@ -35,6 +39,17 @@ func (rf *Raft) SendHeartBeat(forTerm int32, toPeer int) {
 }
 
 func (rf *Raft) SendAppendEntry(ctx context.Context, peer int, from int, to int, currentTerm int32) (ReplicationStatus, *AppendEntryExtras) {
+	i, j := from, from+BatchSize
+	for ; i <= to && j <= to; i, j = j, j+BatchSize {
+		res, extra := rf.sendAppendEntry(ctx, peer, i, j, currentTerm)
+		if res != REPLICATE_SUCCESS {
+			return res, extra
+		}
+	}
+	return rf.sendAppendEntry(ctx, peer, i, to, currentTerm)
+}
+
+func (rf *Raft) sendAppendEntry(ctx context.Context, peer int, from int, to int, currentTerm int32) (ReplicationStatus, *AppendEntryExtras) {
 	replyChan := make(chan bool)
 	reply := &AppendEntriesReply{}
 	go func() {

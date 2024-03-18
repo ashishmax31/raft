@@ -32,7 +32,7 @@ import (
 
 const (
 	DEBUG                = false
-	leaderTickerDuration = time.Duration(250 * time.Millisecond)
+	leaderTickerDuration = time.Duration(200 * time.Millisecond)
 )
 
 type ApplyMsg struct {
@@ -48,6 +48,12 @@ type VotedFor struct {
 
 type RaftPeer interface {
 	Call(svcMeth string, args interface{}, reply interface{}) bool
+}
+
+type LogEntry struct {
+	Content  interface{}
+	Term     int32
+	LogIndex int
 }
 
 // A Go object implementing a single Raft peer.
@@ -76,12 +82,6 @@ type Raft struct {
 	LogReplicationState
 }
 
-type LogEntry struct {
-	Content  interface{}
-	Term     int32
-	LogIndex int
-}
-
 func (rf *Raft) Log(msg string, args ...any) {
 	if rf.debug {
 		prefix := fmt.Sprintf("[instance: %s, me: %d]: ", rf.candidateID, rf.me)
@@ -106,41 +106,7 @@ func (rf *Raft) GetState() (int, bool) {
 	return int(rf.GetCurrentTerm()), rf.IsLeader()
 }
 
-func (rf *Raft) LastLogIndex() int {
-	rf.mu.RLock()
-	defer rf.mu.RUnlock()
-	return len(rf.logContents)
-}
-
-func (rf *Raft) GetCommitIndex() int {
-	rf.mu.RLock()
-	defer rf.mu.RUnlock()
-	return rf.commitIndex
-}
-
-func (rf *Raft) GetLogEntryAt(at int) LogEntry {
-	rf.mu.RLock()
-	defer rf.mu.RUnlock()
-	return rf.logContents[at]
-}
-
-func (rf *Raft) LastLogTerm() int32 {
-	lastLogIndex := rf.LastLogIndex()
-	if lastLogIndex == 0 {
-		return 0
-	}
-	return rf.logContents[lastLogIndex-1].Term
-}
-
-func (rf *Raft) LogLength() int {
-	rf.mu.RLock()
-	defer rf.mu.RUnlock()
-	return len(rf.logContents)
-}
-
 func (rf *Raft) Persist() {
-	// Your code here (2C).
-	// Example:
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
 	rf.persist()
@@ -177,104 +143,6 @@ func (rf *Raft) readPersist(data []byte) {
 		rf.logContents = state.Log
 		rf.votedFor = state.VotedFor
 	}
-}
-
-func (rf *Raft) GetCurrentTerm() int32 {
-	rf.mu.RLock()
-	defer rf.mu.RUnlock()
-	return rf.currentTerm
-}
-
-func (rf *Raft) Peers() []RaftPeer {
-	return rf.peers
-}
-
-func (rf *Raft) Me() int {
-	return rf.me
-}
-
-func (rf *Raft) GetCandidateID() string {
-	return rf.candidateID
-}
-
-func (rf *Raft) VoteForSelf() {
-	rf.mu.Lock()
-	defer rf.mu.Unlock()
-	rf.votedFor = &VotedFor{
-		Candidate: rf.candidateID,
-		Term:      rf.currentTerm,
-	}
-	rf.persist()
-}
-
-func (rf *Raft) SetTerm(to int32) int32 {
-	rf.mu.Lock()
-	defer rf.mu.Unlock()
-	if to > rf.currentTerm {
-		rf.currentTerm = to
-		rf.votedFor = nil
-		rf.persist()
-	}
-	return rf.currentTerm
-}
-
-func (rf *Raft) IncrementTerm() {
-	rf.mu.Lock()
-	defer rf.mu.Unlock()
-	rf.currentTerm += 1
-	rf.votedFor = nil
-	rf.persist()
-}
-
-func (rf *Raft) getCurrentLeader() RaftPeer {
-	rf.mu.RLock()
-	defer rf.mu.RUnlock()
-	return rf.currentLeader
-}
-func (rf *Raft) setCurrentLeader(leader RaftPeer) {
-	rf.mu.Lock()
-	defer rf.mu.Unlock()
-	rf.currentLeader = leader
-}
-
-func (rf *Raft) GetFirstEntryWithTerm(term int32) LogEntry {
-	rf.mu.RLock()
-	defer rf.mu.RUnlock()
-	return rf.getFirstEntryWithTerm(term)
-}
-
-func (rf *Raft) getFirstEntryWithTerm(term int32) LogEntry {
-	for _, entry := range rf.logContents {
-		if entry.Term == term {
-			return entry
-		}
-	}
-	return LogEntry{
-		LogIndex: -1,
-	}
-}
-
-func (rf *Raft) GetLastEntryWithTerm(term int32) *LogEntry {
-	rf.mu.RLock()
-	defer rf.mu.RUnlock()
-	return rf.getLastEntryWithTerm(term)
-}
-
-func (rf *Raft) getLastEntryWithTerm(term int32) *LogEntry {
-	currLen := len(rf.logContents)
-	for i := currLen - 1; i >= 0; i-- {
-		curr := rf.logContents[i]
-		if curr.Term == term {
-			return &curr
-		}
-	}
-	return nil
-}
-
-func (rf *Raft) getLogLen() int32 {
-	rf.mu.RLock()
-	defer rf.mu.RUnlock()
-	return int32(len(rf.logContents))
 }
 
 func (rf *Raft) ApplyToStateMachine() {
@@ -439,12 +307,12 @@ func (rf *Raft) StartLeaderRoutine(stopChan chan struct{}) {
 	stopHeartBeatsChan := make(chan struct{})
 	defer rf.stopReplicators()
 	defer close(stopHeartBeatsChan)
-	rf.SendTransitionedToLeaderAck()
 	currentTerm := rf.GetCurrentTerm()
 	go rf.sendInitialHeartBeats(stopHeartBeatsChan, currentTerm)
 	leaderTicker := time.NewTicker(leaderTickerDuration)
 	defer leaderTicker.Stop()
 	rf.Log("starting leader routine. term: %d", rf.GetCurrentTerm())
+	rf.SendTransitionedToLeaderAck()
 	for {
 		select {
 		case <-rf.killedChan:
@@ -494,8 +362,8 @@ func (rf *Raft) sendInitialHeartBeats(stopChan chan struct{}, forTerm int32) {
 						}
 						if reply.Term > rf.GetCurrentTerm() {
 							rf.Log("Send heartbeat failed for peer: %d: peer term: %d my term: %d", ind, reply.Term, rf.GetCurrentTerm())
-							rf.SetTerm(reply.Term)
 							rf.TransitionToFollower(fmt.Sprintf("from send init heartBeat [%s]from leader with term: %d", rf.candidateID, rf.currentTerm))
+							rf.SetTerm(reply.Term)
 							return
 						}
 					}
@@ -573,7 +441,7 @@ func (rf *Raft) StartFollowerWatchDog(stopChan chan struct{}) {
 		case <-timeoutChan:
 			rf.ReleaseFollowerFlag()
 			rf.Log("election timeout")
-			rf.TransitionToCandidate()
+			rf.TransitionToCandidate("transitioning to candidate")
 			rf.Log("send to candidate chan")
 			return
 		}

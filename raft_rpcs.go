@@ -1,6 +1,9 @@
 package raft
 
-import "fmt"
+import (
+	"fmt"
+	"time"
+)
 
 type AppendEntriesArgs struct {
 	Term         int32
@@ -42,41 +45,54 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
 	rf.Log("got vote request from %s for term %d", args.CandidateID, args.Term)
-	if (args.Term >= rf.currentTerm) && (rf.votedFor == nil || args.Term > rf.votedFor.Term) && rf.candidateUptodate(args.LastLogIndex, args.LastLogTerm) {
+	if args.Term < rf.currentTerm {
+		rf.Log("rejected request vote from %s for term %d. updated term: %d", args.CandidateID, args.Term, rf.currentTerm)
+		resp = RequestVoteReply{
+			Granted: false,
+			Term:    rf.currentTerm,
+		}
+		*reply = resp
+		return
+	}
+
+	if args.Term > rf.currentTerm {
+		rf.currentTerm = args.Term
+		rf.votedFor = nil
+		rf.persist()
+		rf.Log("stepping down as leader from request vote")
+		rf.SafeTransitionWithMutex(rf.TransitionToFollower, fmt.Sprintf("from request vote [%s]from leader with term: %d", rf.candidateID, rf.currentTerm))
+	}
+
+	if rf.shouldVoteForCandidate(args) {
 		rf.votedFor = &VotedFor{
 			Candidate: args.CandidateID,
 			Term:      args.Term,
 		}
 		rf.persist()
-		if rf.IsLeader() {
-			rf.Log("stepping down as leader from request vote")
-			rf.TransitionToFollower(fmt.Sprintf("from request vote [%s]from leader with term: %d", rf.candidateID, rf.currentTerm))
-		} else if rf.IsFollower() {
-			rf.blockingNotifyWhile(rf.heartBeatChan, "sending heartbeat from request vote", rf.IsFollower)
-		}
+		rf.lastHeartBeatTime = time.Now()
+		rf.SafeTransitionWithMutex(rf.TransitionToFollower, fmt.Sprintf("from request vote [%s]from candidate with term: %d", rf.candidateID, rf.currentTerm))
 		resp = RequestVoteReply{
 			Granted: true,
 			Term:    args.Term,
 		}
-
 		*reply = resp
-		rf.Log("accepted request vote from %s with term %d. My term: %d", args.CandidateID, args.Term, rf.currentTerm)
 		return
 	}
-	if args.Term > rf.currentTerm {
-		rf.currentTerm = args.Term
-		rf.persist()
-		if rf.IsLeader() {
-			rf.Log("stepping down as leader from request vote")
-			rf.TransitionToFollower(fmt.Sprintf("from request vote [%s]from leader with term: %d", rf.candidateID, rf.currentTerm))
-		}
-	}
-	rf.Log("rejected request vote from %s for term %d. updated term: %d", args.CandidateID, args.Term, rf.currentTerm)
 	resp = RequestVoteReply{
 		Granted: false,
 		Term:    rf.currentTerm,
 	}
 	*reply = resp
+}
+
+func (rf *Raft) shouldVoteForCandidate(args *RequestVoteArgs) bool {
+	return args.Term >= rf.currentTerm &&
+		rf.validVotedFor(args) &&
+		rf.candidateUptodate(args.LastLogIndex, args.LastLogTerm)
+}
+
+func (rf *Raft) validVotedFor(args *RequestVoteArgs) bool {
+	return rf.votedFor == nil || (rf.votedFor != nil && rf.votedFor.Candidate == args.CandidateID)
 }
 
 func (rf *Raft) candidateUptodate(candidateLastLogIndex int32, candidateLastLogTerm int32) bool {
@@ -96,10 +112,12 @@ func (rf *Raft) candidateUptodate(candidateLastLogIndex int32, candidateLastLogT
 }
 
 func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply) {
-	if args.Term >= rf.GetCurrentTerm() {
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+	if args.Term >= rf.currentTerm {
 		rf.acknowledgeHeartBeat(args)
 		if len(args.Entries) == 0 {
-			rf.UpdateCommitIndex(args.LeaderCommit)
+			rf.updateCommitIndex(args.LeaderCommit)
 			// If its a heartbeat only append entry rpc call.
 			*reply = AppendEntriesReply{
 				Success: true,
@@ -109,14 +127,15 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		}
 		success, logChanged, extraInfo := rf.appendToLog(args)
 		if logChanged {
-			rf.Persist()
+			rf.persist()
 		}
 		if success {
 			*reply = AppendEntriesReply{
 				Success: true,
 				Term:    args.Term,
 			}
-			rf.UpdateCommitIndex(args.LeaderCommit)
+			lastEntryFromLeader := args.Entries[len(args.Entries)-1]
+			rf.updateCommitIndex(min(args.LeaderCommit, lastEntryFromLeader.LogIndex))
 		} else {
 			*reply = AppendEntriesReply{
 				Success:   false,
@@ -128,13 +147,11 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	}
 	*reply = AppendEntriesReply{
 		Success: false,
-		Term:    rf.GetCurrentTerm(),
+		Term:    rf.currentTerm,
 	}
 }
 
 func (rf *Raft) appendToLog(args *AppendEntriesArgs) (bool, bool, *AppendEntryExtras) {
-	rf.mu.Lock()
-	defer rf.mu.Unlock()
 	lastEntryFromLeader := args.Entries[len(args.Entries)-1]
 	currentLastLogIndex := len(rf.logContents)
 	currentLogLen := currentLastLogIndex
@@ -152,8 +169,9 @@ func (rf *Raft) appendToLog(args *AppendEntriesArgs) (bool, bool, *AppendEntryEx
 			rf.logContents = append(rf.logContents, args.Entries...)
 			return true, true, nil
 		}
-		// If the entry at this peers log at logEntryFromLeader.LogIndex doesnt match with the
-		// logEntryFromLeader.
+
+		// Only truncate the logs if the incoming entries modified the servers log.
+		// Otherwise and out of order request can wipe out legit entries from the servers log.
 		if logModified := rf.InsertEntries(currentLogLen, args); logModified {
 			rf.logContents = rf.logContents[:lastEntryFromLeader.LogIndex]
 			return true, true, nil
@@ -173,6 +191,8 @@ func (rf *Raft) appendToLog(args *AppendEntriesArgs) (bool, bool, *AppendEntryEx
 		// If the prev entry in the peers log and leaders prev entry match.
 		if currentPrevLogEntry.LogIndex == args.PrevLogIndex && currentPrevLogEntry.Term == args.PrevLogTerm {
 			modified := rf.InsertEntries(currentLogLen, args)
+			// Only truncate the logs if the incoming entries modified the servers log.
+			// Otherwise and out of order request can wipe out legit entries from the servers log.
 			if modified {
 				rf.logContents = rf.logContents[:lastEntryFromLeader.LogIndex]
 			}
@@ -182,8 +202,9 @@ func (rf *Raft) appendToLog(args *AppendEntriesArgs) (bool, bool, *AppendEntryEx
 			// Prev entries dont match. We also remove the conflicting entry from the peers log.
 			extraInfo.Xterm = currentPrevLogEntry.Term
 			extraInfo.XIndex = rf.getFirstEntryWithTerm(currentPrevLogEntry.Term).LogIndex
+			rf.logContents = rf.logContents[:currentPrevLogEntry.LogIndex-1]
 			rf.Log("Prev entry's index and/or term doesnt match with the leader.")
-			return false, false, extraInfo
+			return false, true, extraInfo
 		}
 	}
 	extraInfo.XLen = currentLogLen
@@ -215,19 +236,17 @@ func (rf *Raft) InsertEntries(currentLogLen int, args *AppendEntriesArgs) bool {
 }
 
 func (rf *Raft) acknowledgeHeartBeat(args *AppendEntriesArgs) {
-	if rf.IsFollower() {
-		rf.blockingNotifyWhile(rf.heartBeatChan, "acking heart beat from leader", rf.IsFollower)
-	}
-	if args.Term > rf.GetCurrentTerm() {
-		rf.SetTerm(args.Term)
+	rf.lastHeartBeatTime = time.Now()
+	if args.Term > rf.currentTerm {
+		rf.setTerm(args.Term)
 	}
 
 	if rf.IsElectionRunning() {
 		rf.Log("asked to stop election and tranistioning to follower")
-		rf.TransitionToFollower(fmt.Sprintf("from ack heartbeat [%s]from candidate with term: %d", rf.candidateID, rf.currentTerm))
+		rf.SafeTransitionWithMutex(rf.TransitionToFollower, fmt.Sprintf("from ack heartbeat [%s]from candidate with term: %d", rf.candidateID, rf.currentTerm))
 	}
 	if rf.IsLeader() {
-		rf.TransitionToFollower(fmt.Sprintf("from ack heartbeat [%s]from leader with term: %d", rf.candidateID, rf.currentTerm))
+		rf.SafeTransitionWithMutex(rf.TransitionToFollower, fmt.Sprintf("from ack heartbeat [%s]from leader with term: %d", rf.candidateID, rf.currentTerm))
 		rf.Log("asked to transition from leader to follower")
 	}
 
@@ -238,11 +257,17 @@ func (rf *Raft) acknowledgeHeartBeat(args *AppendEntriesArgs) {
 }
 
 func (rf *Raft) UpdateCommitIndex(leaderCommitIndex int) {
-	currentLogLen := rf.LogLength()
 	rf.mu.Lock()
+	defer rf.mu.Unlock()
+	currentLogLen := rf.logLength()
 	rf.commitIndex = min(currentLogLen, leaderCommitIndex)
 	rf.ApplyToStateMachine()
-	rf.mu.Unlock()
+}
+
+func (rf *Raft) updateCommitIndex(leaderCommitIndex int) {
+	currentLogLen := rf.logLength()
+	rf.commitIndex = min(currentLogLen, leaderCommitIndex)
+	rf.ApplyToStateMachine()
 }
 
 func min(x, y int) int {

@@ -10,12 +10,14 @@ import (
 
 const timeoutDuration = time.Millisecond * 100
 
+type StateTransitionFn func(info string)
+
 type StateManager interface {
 	IsFollower() bool
 	IsLeader() bool
 	IsElectionRunning() bool
-	TransitionToCandidate()
-	TransitionToLeader(term int)
+	TransitionToCandidate(info string)
+	TransitionToLeader(info string)
 	TransitionToFollower(info string)
 	LeaderChan() chan struct{}
 	CandidateChan() chan struct{}
@@ -116,7 +118,7 @@ func (s *stateManager) ReleaseFollowerFlag() {
 	s.followerRoutineRunning.Store(false)
 }
 
-func (s *stateManager) TransitionToCandidate() {
+func (s *stateManager) TransitionToCandidate(info string) {
 	s.Lock()
 	defer s.Unlock()
 	if s.isElectionRunning() {
@@ -151,7 +153,7 @@ func (s *stateManager) TransitionToCandidate() {
 	}
 }
 
-func (s *stateManager) TransitionToLeader(term int) {
+func (s *stateManager) TransitionToLeader(info string) {
 	s.Lock()
 	defer s.Unlock()
 	if s.isLeader() {
@@ -159,10 +161,10 @@ func (s *stateManager) TransitionToLeader(term int) {
 	}
 
 	if s.isFollower() {
-		s.blockingNotifyWithAckWhile(s.stopFollowerChan, fmt.Sprintf("[term: %d]stop follower, becoming leader", term), s.isFollower)
+		s.blockingNotifyWithAckWhile(s.stopFollowerChan, fmt.Sprintf("[term: %s]stop follower, becoming leader", info), s.isFollower)
 	}
 	if s.isElectionRunning() {
-		s.blockingNotifyWhile(s.stopElectionChan, fmt.Sprintf("[term: %d]stop election, becoming leader", term), s.isElectionRunning)
+		s.blockingNotifyWhile(s.stopElectionChan, fmt.Sprintf("[term: %s]stop election, becoming leader", info), s.isElectionRunning)
 	}
 	ctx1, cancelFn1 := context.WithTimeout(context.Background(), timeoutDuration)
 	defer cancelFn1()
@@ -170,7 +172,6 @@ func (s *stateManager) TransitionToLeader(term int) {
 	case <-s.raftKilledChan:
 		return
 	case s.leaderChan <- struct{}{}:
-		s.raiseLeaderFlag()
 		break
 	case <-ctx1.Done():
 		panic("failed to transition to leader")
@@ -181,9 +182,10 @@ func (s *stateManager) TransitionToLeader(term int) {
 	case <-s.raftKilledChan:
 		return
 	case <-s.leaderAckChannel:
+		s.raiseLeaderFlag()
 		break
 	case <-ctx2.Done():
-		panic(fmt.Sprintf("[term: %d]failed to receive ack from leader", term))
+		panic(fmt.Sprintf("[term: %s]failed to receive ack from leader", info))
 	}
 }
 
@@ -262,7 +264,7 @@ func (s *stateManager) SendTransitionedToLeaderAck() {
 }
 
 func (s *stateManager) blockingNotifyWithAckWhile(channel chan struct{}, action string, condFn func() bool) {
-	ctx, cancelFn := context.WithTimeout(context.Background(), time.Millisecond*50)
+	ctx, cancelFn := context.WithTimeout(context.Background(), time.Millisecond*100)
 	defer cancelFn()
 	for condFn() {
 		select {
@@ -288,7 +290,7 @@ func (s *stateManager) blockingNotifyWithAckWhile(channel chan struct{}, action 
 }
 
 func (s *stateManager) blockingNotifyWhile(channel chan struct{}, action string, condFn func() bool) {
-	ctx, cancelFn := context.WithTimeout(context.Background(), time.Millisecond*50)
+	ctx, cancelFn := context.WithTimeout(context.Background(), time.Millisecond*100)
 	defer cancelFn()
 	for condFn() {
 		select {

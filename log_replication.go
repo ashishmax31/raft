@@ -163,7 +163,9 @@ func (r *replicator) stopPreviousReplicationRoutines(currentRoutineID ID) {
 
 // updateReplicationIndexes updates the match and next indexes.
 func (r *replicator) updateLeaderReplicationIndexes(matchIndex int) {
-	r.leader.SetMatchIndex(r.peerIndex, matchIndex)
-	r.leader.SetNextIndex(r.peerIndex, matchIndex+1)
-	r.leader.UpdateLeaderCommitIndex()
+	if r.leader.IsLeader() {
+		r.leader.SetMatchIndex(r.peerIndex, matchIndex)
+		r.leader.SetNextIndex(r.peerIndex, matchIndex+1)
+		r.leader.UpdateLeaderCommitIndex()
+	}
 }

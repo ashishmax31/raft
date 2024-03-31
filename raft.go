@@ -32,7 +32,7 @@ import (
 
 const (
 	DEBUG                = false
-	leaderTickerDuration = time.Duration(250 * time.Millisecond)
+	leaderTickerDuration = time.Duration(200 * time.Millisecond)
 )
 
 type ApplyMsg struct {
@@ -50,36 +50,36 @@ type RaftPeer interface {
 	Call(svcMeth string, args interface{}, reply interface{}) bool
 }
 
-// A Go object implementing a single Raft peer.
-type Raft struct {
-	candidateID      string
-	mu               sync.RWMutex // Lock to protect shared access to this peer's state
-	peers            []RaftPeer   // RPC end points of all peers
-	persister        *Persister   // Object to hold this peer's persisted state
-	me               int          // this peer's index into peers[]
-	dead             int32        // set by Kill()
-	currentTerm      int32
-	votedFor         *VotedFor
-	heartBeatChan    chan struct{}
-	stopElectionChan chan struct{}
-	logContents      []LogEntry
-	commitIndex      int
-	lastApplied      int
-	lastLogIndex     int
-	replicators      []Replicator
-	currentLeader    RaftPeer
-	killedChan       chan struct{}
-	electionMgr      LeaderElectionManager
-	applyCh          chan ApplyMsg
-	debug            bool
-	StateManager
-	LogReplicationState
-}
-
 type LogEntry struct {
 	Content  interface{}
 	Term     int32
 	LogIndex int
+}
+
+// A Go object implementing a single Raft peer.
+type Raft struct {
+	candidateID       string
+	mu                sync.RWMutex // Lock to protect shared access to this peer's state
+	peers             []RaftPeer   // RPC end points of all peers
+	persister         *Persister   // Object to hold this peer's persisted state
+	me                int          // this peer's index into peers[]
+	dead              int32        // set by Kill()
+	currentTerm       int32
+	votedFor          *VotedFor
+	lastHeartBeatTime time.Time
+	stopElectionChan  chan struct{}
+	logContents       []LogEntry
+	commitIndex       int
+	lastApplied       int
+	lastLogIndex      int
+	replicators       []Replicator
+	currentLeader     RaftPeer
+	killedChan        chan struct{}
+	electionMgr       LeaderElectionManager
+	applyCh           chan ApplyMsg
+	debug             bool
+	StateManager
+	LogReplicationState
 }
 
 func (rf *Raft) Log(msg string, args ...any) {
@@ -106,41 +106,7 @@ func (rf *Raft) GetState() (int, bool) {
 	return int(rf.GetCurrentTerm()), rf.IsLeader()
 }
 
-func (rf *Raft) LastLogIndex() int {
-	rf.mu.RLock()
-	defer rf.mu.RUnlock()
-	return len(rf.logContents)
-}
-
-func (rf *Raft) GetCommitIndex() int {
-	rf.mu.RLock()
-	defer rf.mu.RUnlock()
-	return rf.commitIndex
-}
-
-func (rf *Raft) GetLogEntryAt(at int) LogEntry {
-	rf.mu.RLock()
-	defer rf.mu.RUnlock()
-	return rf.logContents[at]
-}
-
-func (rf *Raft) LastLogTerm() int32 {
-	lastLogIndex := rf.LastLogIndex()
-	if lastLogIndex == 0 {
-		return 0
-	}
-	return rf.logContents[lastLogIndex-1].Term
-}
-
-func (rf *Raft) LogLength() int {
-	rf.mu.RLock()
-	defer rf.mu.RUnlock()
-	return len(rf.logContents)
-}
-
 func (rf *Raft) Persist() {
-	// Your code here (2C).
-	// Example:
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
 	rf.persist()
@@ -177,104 +143,6 @@ func (rf *Raft) readPersist(data []byte) {
 		rf.logContents = state.Log
 		rf.votedFor = state.VotedFor
 	}
-}
-
-func (rf *Raft) GetCurrentTerm() int32 {
-	rf.mu.RLock()
-	defer rf.mu.RUnlock()
-	return rf.currentTerm
-}
-
-func (rf *Raft) Peers() []RaftPeer {
-	return rf.peers
-}
-
-func (rf *Raft) Me() int {
-	return rf.me
-}
-
-func (rf *Raft) GetCandidateID() string {
-	return rf.candidateID
-}
-
-func (rf *Raft) VoteForSelf() {
-	rf.mu.Lock()
-	defer rf.mu.Unlock()
-	rf.votedFor = &VotedFor{
-		Candidate: rf.candidateID,
-		Term:      rf.currentTerm,
-	}
-	rf.persist()
-}
-
-func (rf *Raft) SetTerm(to int32) int32 {
-	rf.mu.Lock()
-	defer rf.mu.Unlock()
-	if to > rf.currentTerm {
-		rf.currentTerm = to
-		rf.votedFor = nil
-		rf.persist()
-	}
-	return rf.currentTerm
-}
-
-func (rf *Raft) IncrementTerm() {
-	rf.mu.Lock()
-	defer rf.mu.Unlock()
-	rf.currentTerm += 1
-	rf.votedFor = nil
-	rf.persist()
-}
-
-func (rf *Raft) getCurrentLeader() RaftPeer {
-	rf.mu.RLock()
-	defer rf.mu.RUnlock()
-	return rf.currentLeader
-}
-func (rf *Raft) setCurrentLeader(leader RaftPeer) {
-	rf.mu.Lock()
-	defer rf.mu.Unlock()
-	rf.currentLeader = leader
-}
-
-func (rf *Raft) GetFirstEntryWithTerm(term int32) LogEntry {
-	rf.mu.RLock()
-	defer rf.mu.RUnlock()
-	return rf.getFirstEntryWithTerm(term)
-}
-
-func (rf *Raft) getFirstEntryWithTerm(term int32) LogEntry {
-	for _, entry := range rf.logContents {
-		if entry.Term == term {
-			return entry
-		}
-	}
-	return LogEntry{
-		LogIndex: -1,
-	}
-}
-
-func (rf *Raft) GetLastEntryWithTerm(term int32) *LogEntry {
-	rf.mu.RLock()
-	defer rf.mu.RUnlock()
-	return rf.getLastEntryWithTerm(term)
-}
-
-func (rf *Raft) getLastEntryWithTerm(term int32) *LogEntry {
-	currLen := len(rf.logContents)
-	for i := currLen - 1; i >= 0; i-- {
-		curr := rf.logContents[i]
-		if curr.Term == term {
-			return &curr
-		}
-	}
-	return nil
-}
-
-func (rf *Raft) getLogLen() int32 {
-	rf.mu.RLock()
-	defer rf.mu.RUnlock()
-	return int32(len(rf.logContents))
 }
 
 func (rf *Raft) ApplyToStateMachine() {
@@ -357,7 +225,6 @@ func Make(peers []RaftPeer, me int,
 	id := uuid.NewString()
 	rf := &Raft{
 		candidateID:      id,
-		heartBeatChan:    make(chan struct{}),
 		stopElectionChan: make(chan struct{}),
 		killedChan:       make(chan struct{}),
 		applyCh:          applyCh,
@@ -391,7 +258,7 @@ func (rf *Raft) StartRaftManager(stopFollowerChan, stopLeaderChan chan struct{})
 			go rf.StartFollowerWatchDog(stopFollowerChan)
 			rf.Log("transitioned to follower")
 		case <-leaderChan:
-			go rf.StartLeaderRoutine(stopLeaderChan)
+			go rf.StartLeaderRoutine(rf.GetCurrentTerm(), stopLeaderChan)
 			rf.Log("transitioned to leader: term: %d", rf.GetCurrentTerm())
 		case <-candidateChan:
 			go rf.electionMgr.RunElection(rf.killedChan, rf.stopElectionChan)
@@ -433,18 +300,17 @@ func (rf *Raft) stopReplicators() {
 	}
 }
 
-func (rf *Raft) StartLeaderRoutine(stopChan chan struct{}) {
+func (rf *Raft) StartLeaderRoutine(currentTerm int32, stopChan chan struct{}) {
 	rf.intializeLeaderState()
-	defer rf.Log("no longer leader!!!![term: %d]", rf.GetCurrentTerm())
+	defer rf.Log("no longer leader!!!![term: %d]", currentTerm)
 	stopHeartBeatsChan := make(chan struct{})
 	defer rf.stopReplicators()
 	defer close(stopHeartBeatsChan)
-	rf.SendTransitionedToLeaderAck()
-	currentTerm := rf.GetCurrentTerm()
 	go rf.sendInitialHeartBeats(stopHeartBeatsChan, currentTerm)
 	leaderTicker := time.NewTicker(leaderTickerDuration)
 	defer leaderTicker.Stop()
-	rf.Log("starting leader routine. term: %d", rf.GetCurrentTerm())
+	rf.Log("starting leader routine. term: %d", currentTerm)
+	rf.SendTransitionedToLeaderAck()
 	for {
 		select {
 		case <-rf.killedChan:
@@ -494,8 +360,8 @@ func (rf *Raft) sendInitialHeartBeats(stopChan chan struct{}, forTerm int32) {
 						}
 						if reply.Term > rf.GetCurrentTerm() {
 							rf.Log("Send heartbeat failed for peer: %d: peer term: %d my term: %d", ind, reply.Term, rf.GetCurrentTerm())
-							rf.SetTerm(reply.Term)
 							rf.TransitionToFollower(fmt.Sprintf("from send init heartBeat [%s]from leader with term: %d", rf.candidateID, rf.currentTerm))
+							rf.SetTerm(reply.Term)
 							return
 						}
 					}
@@ -526,19 +392,22 @@ func getElectionTimeoutDuration() time.Duration {
 	return time.Millisecond * time.Duration(randRange)
 }
 
+func (rf *Raft) LastHeartBeatTime() time.Time {
+	rf.mu.RLock()
+	defer rf.mu.RUnlock()
+	return rf.lastHeartBeatTime
+}
+
 func (rf *Raft) StartFollowerWatchDog(stopChan chan struct{}) {
-	var mu sync.RWMutex
 	timeoutDuration := getElectionTimeoutDuration()
 	timeoutChan := make(chan struct{})
 	exitedChan := make(chan struct{})
 	defer close(exitedChan)
-	start := time.Now()
 	rf.SendTransitionedToFollowerAck()
+	rf.lastHeartBeatTime = time.Now()
 	go func() {
 		for {
-			mu.RLock()
-			if time.Since(start).Milliseconds() > timeoutDuration.Milliseconds() {
-				mu.RUnlock()
+			if time.Since(rf.LastHeartBeatTime()).Milliseconds() > timeoutDuration.Milliseconds() {
 				select {
 				case <-exitedChan:
 					close(timeoutChan)
@@ -552,17 +421,12 @@ func (rf *Raft) StartFollowerWatchDog(stopChan chan struct{}) {
 					return
 				}
 			}
-			mu.RUnlock()
 			time.Sleep(5 * time.Millisecond)
 		}
 	}()
 	rf.Log("timeout duration: %s", timeoutDuration.String())
 	for {
 		select {
-		case <-rf.heartBeatChan:
-			mu.Lock()
-			start = time.Now()
-			mu.Unlock()
 		case <-stopChan:
 			rf.ReleaseFollowerFlag()
 			rf.sendAck(stopChan)
@@ -573,7 +437,7 @@ func (rf *Raft) StartFollowerWatchDog(stopChan chan struct{}) {
 		case <-timeoutChan:
 			rf.ReleaseFollowerFlag()
 			rf.Log("election timeout")
-			rf.TransitionToCandidate()
+			rf.TransitionToCandidate("transitioning to candidate")
 			rf.Log("send to candidate chan")
 			return
 		}

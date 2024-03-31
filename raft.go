@@ -58,26 +58,26 @@ type LogEntry struct {
 
 // A Go object implementing a single Raft peer.
 type Raft struct {
-	candidateID      string
-	mu               sync.RWMutex // Lock to protect shared access to this peer's state
-	peers            []RaftPeer   // RPC end points of all peers
-	persister        *Persister   // Object to hold this peer's persisted state
-	me               int          // this peer's index into peers[]
-	dead             int32        // set by Kill()
-	currentTerm      int32
-	votedFor         *VotedFor
-	heartBeatChan    chan struct{}
-	stopElectionChan chan struct{}
-	logContents      []LogEntry
-	commitIndex      int
-	lastApplied      int
-	lastLogIndex     int
-	replicators      []Replicator
-	currentLeader    RaftPeer
-	killedChan       chan struct{}
-	electionMgr      LeaderElectionManager
-	applyCh          chan ApplyMsg
-	debug            bool
+	candidateID       string
+	mu                sync.RWMutex // Lock to protect shared access to this peer's state
+	peers             []RaftPeer   // RPC end points of all peers
+	persister         *Persister   // Object to hold this peer's persisted state
+	me                int          // this peer's index into peers[]
+	dead              int32        // set by Kill()
+	currentTerm       int32
+	votedFor          *VotedFor
+	lastHeartBeatTime time.Time
+	stopElectionChan  chan struct{}
+	logContents       []LogEntry
+	commitIndex       int
+	lastApplied       int
+	lastLogIndex      int
+	replicators       []Replicator
+	currentLeader     RaftPeer
+	killedChan        chan struct{}
+	electionMgr       LeaderElectionManager
+	applyCh           chan ApplyMsg
+	debug             bool
 	StateManager
 	LogReplicationState
 }
@@ -225,7 +225,6 @@ func Make(peers []RaftPeer, me int,
 	id := uuid.NewString()
 	rf := &Raft{
 		candidateID:      id,
-		heartBeatChan:    make(chan struct{}),
 		stopElectionChan: make(chan struct{}),
 		killedChan:       make(chan struct{}),
 		applyCh:          applyCh,
@@ -259,7 +258,7 @@ func (rf *Raft) StartRaftManager(stopFollowerChan, stopLeaderChan chan struct{})
 			go rf.StartFollowerWatchDog(stopFollowerChan)
 			rf.Log("transitioned to follower")
 		case <-leaderChan:
-			go rf.StartLeaderRoutine(stopLeaderChan)
+			go rf.StartLeaderRoutine(rf.GetCurrentTerm(), stopLeaderChan)
 			rf.Log("transitioned to leader: term: %d", rf.GetCurrentTerm())
 		case <-candidateChan:
 			go rf.electionMgr.RunElection(rf.killedChan, rf.stopElectionChan)
@@ -301,17 +300,16 @@ func (rf *Raft) stopReplicators() {
 	}
 }
 
-func (rf *Raft) StartLeaderRoutine(stopChan chan struct{}) {
+func (rf *Raft) StartLeaderRoutine(currentTerm int32, stopChan chan struct{}) {
 	rf.intializeLeaderState()
-	defer rf.Log("no longer leader!!!![term: %d]", rf.GetCurrentTerm())
+	defer rf.Log("no longer leader!!!![term: %d]", currentTerm)
 	stopHeartBeatsChan := make(chan struct{})
 	defer rf.stopReplicators()
 	defer close(stopHeartBeatsChan)
-	currentTerm := rf.GetCurrentTerm()
 	go rf.sendInitialHeartBeats(stopHeartBeatsChan, currentTerm)
 	leaderTicker := time.NewTicker(leaderTickerDuration)
 	defer leaderTicker.Stop()
-	rf.Log("starting leader routine. term: %d", rf.GetCurrentTerm())
+	rf.Log("starting leader routine. term: %d", currentTerm)
 	rf.SendTransitionedToLeaderAck()
 	for {
 		select {
@@ -394,19 +392,22 @@ func getElectionTimeoutDuration() time.Duration {
 	return time.Millisecond * time.Duration(randRange)
 }
 
+func (rf *Raft) LastHeartBeatTime() time.Time {
+	rf.mu.RLock()
+	defer rf.mu.RUnlock()
+	return rf.lastHeartBeatTime
+}
+
 func (rf *Raft) StartFollowerWatchDog(stopChan chan struct{}) {
-	var mu sync.RWMutex
 	timeoutDuration := getElectionTimeoutDuration()
 	timeoutChan := make(chan struct{})
 	exitedChan := make(chan struct{})
 	defer close(exitedChan)
-	start := time.Now()
 	rf.SendTransitionedToFollowerAck()
+	rf.lastHeartBeatTime = time.Now()
 	go func() {
 		for {
-			mu.RLock()
-			if time.Since(start).Milliseconds() > timeoutDuration.Milliseconds() {
-				mu.RUnlock()
+			if time.Since(rf.LastHeartBeatTime()).Milliseconds() > timeoutDuration.Milliseconds() {
 				select {
 				case <-exitedChan:
 					close(timeoutChan)
@@ -420,17 +421,12 @@ func (rf *Raft) StartFollowerWatchDog(stopChan chan struct{}) {
 					return
 				}
 			}
-			mu.RUnlock()
 			time.Sleep(5 * time.Millisecond)
 		}
 	}()
 	rf.Log("timeout duration: %s", timeoutDuration.String())
 	for {
 		select {
-		case <-rf.heartBeatChan:
-			mu.Lock()
-			start = time.Now()
-			mu.Unlock()
 		case <-stopChan:
 			rf.ReleaseFollowerFlag()
 			rf.sendAck(stopChan)

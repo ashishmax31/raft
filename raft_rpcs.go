@@ -1,6 +1,9 @@
 package raft
 
-import "fmt"
+import (
+	"fmt"
+	"time"
+)
 
 type AppendEntriesArgs struct {
 	Term         int32
@@ -42,41 +45,54 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
 	rf.Log("got vote request from %s for term %d", args.CandidateID, args.Term)
-	if (args.Term >= rf.currentTerm) && (rf.votedFor == nil || args.Term > rf.votedFor.Term) && rf.candidateUptodate(args.LastLogIndex, args.LastLogTerm) {
+	if args.Term < rf.currentTerm {
+		rf.Log("rejected request vote from %s for term %d. updated term: %d", args.CandidateID, args.Term, rf.currentTerm)
+		resp = RequestVoteReply{
+			Granted: false,
+			Term:    rf.currentTerm,
+		}
+		*reply = resp
+		return
+	}
+
+	if args.Term > rf.currentTerm {
+		rf.currentTerm = args.Term
+		rf.votedFor = nil
+		rf.persist()
+		rf.Log("stepping down as leader from request vote")
+		rf.SafeTransitionWithMutex(rf.TransitionToFollower, fmt.Sprintf("from request vote [%s]from leader with term: %d", rf.candidateID, rf.currentTerm))
+	}
+
+	if rf.shouldVoteForCandidate(args) {
 		rf.votedFor = &VotedFor{
 			Candidate: args.CandidateID,
 			Term:      args.Term,
 		}
 		rf.persist()
-		if rf.IsLeader() {
-			rf.Log("stepping down as leader from request vote")
-			rf.SafeTransitionWithMutex(rf.TransitionToFollower, fmt.Sprintf("from request vote [%s]from leader with term: %d", rf.candidateID, rf.currentTerm))
-		} else if rf.IsFollower() {
-			rf.blockingNotifyWhile(rf.heartBeatChan, "sending heartbeat from request vote", rf.IsFollower)
-		}
+		rf.lastHeartBeatTime = time.Now()
+		rf.SafeTransitionWithMutex(rf.TransitionToFollower, fmt.Sprintf("from request vote [%s]from candidate with term: %d", rf.candidateID, rf.currentTerm))
 		resp = RequestVoteReply{
 			Granted: true,
 			Term:    args.Term,
 		}
-
 		*reply = resp
-		rf.Log("accepted request vote from %s with term %d. My term: %d", args.CandidateID, args.Term, rf.currentTerm)
 		return
 	}
-	if args.Term > rf.currentTerm {
-		rf.currentTerm = args.Term
-		rf.persist()
-		if rf.IsLeader() {
-			rf.Log("stepping down as leader from request vote")
-			rf.SafeTransitionWithMutex(rf.TransitionToFollower, fmt.Sprintf("from request vote [%s]from leader with term: %d", rf.candidateID, rf.currentTerm))
-		}
-	}
-	rf.Log("rejected request vote from %s for term %d. updated term: %d", args.CandidateID, args.Term, rf.currentTerm)
 	resp = RequestVoteReply{
 		Granted: false,
 		Term:    rf.currentTerm,
 	}
 	*reply = resp
+}
+
+func (rf *Raft) shouldVoteForCandidate(args *RequestVoteArgs) bool {
+	return args.Term >= rf.currentTerm &&
+		rf.validVotedFor(args) &&
+		rf.candidateUptodate(args.LastLogIndex, args.LastLogTerm)
+}
+
+func (rf *Raft) validVotedFor(args *RequestVoteArgs) bool {
+	return rf.votedFor == nil || (rf.votedFor != nil && rf.votedFor.Candidate == args.CandidateID)
 }
 
 func (rf *Raft) candidateUptodate(candidateLastLogIndex int32, candidateLastLogTerm int32) bool {
@@ -118,7 +134,8 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 				Success: true,
 				Term:    args.Term,
 			}
-			rf.updateCommitIndex(min(args.LeaderCommit, args.PrevLogIndex+len(args.Entries)))
+			lastEntryFromLeader := args.Entries[len(args.Entries)-1]
+			rf.updateCommitIndex(min(args.LeaderCommit, lastEntryFromLeader.LogIndex))
 		} else {
 			*reply = AppendEntriesReply{
 				Success:   false,
@@ -185,8 +202,9 @@ func (rf *Raft) appendToLog(args *AppendEntriesArgs) (bool, bool, *AppendEntryEx
 			// Prev entries dont match. We also remove the conflicting entry from the peers log.
 			extraInfo.Xterm = currentPrevLogEntry.Term
 			extraInfo.XIndex = rf.getFirstEntryWithTerm(currentPrevLogEntry.Term).LogIndex
+			rf.logContents = rf.logContents[:currentPrevLogEntry.LogIndex-1]
 			rf.Log("Prev entry's index and/or term doesnt match with the leader.")
-			return false, false, extraInfo
+			return false, true, extraInfo
 		}
 	}
 	extraInfo.XLen = currentLogLen
@@ -218,9 +236,7 @@ func (rf *Raft) InsertEntries(currentLogLen int, args *AppendEntriesArgs) bool {
 }
 
 func (rf *Raft) acknowledgeHeartBeat(args *AppendEntriesArgs) {
-	if rf.IsFollower() {
-		rf.blockingNotifyWhile(rf.heartBeatChan, "acking heart beat from leader", rf.IsFollower)
-	}
+	rf.lastHeartBeatTime = time.Now()
 	if args.Term > rf.currentTerm {
 		rf.setTerm(args.Term)
 	}

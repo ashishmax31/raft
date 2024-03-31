@@ -8,7 +8,7 @@ import (
 )
 
 const (
-	BatchSize = 20
+	BatchSize = 5000
 )
 
 var _ RaftLeader = (*Raft)(nil)
@@ -125,19 +125,21 @@ func (rf *Raft) GetLogEntries(from, to int) []LogEntry {
 func (rf *Raft) UpdateLeaderCommitIndex() {
 	// rf.Log("current leader log: %#v", rf.logContents)
 	// rf.Log("leader match index: %#v", rf.matchIndex)
-	rf.mu.Lock()
-	defer rf.mu.Unlock()
-	currentTerm := rf.currentTerm
-	matchIndexSlice := rf.MatchIndexCopy()
-	sort.Ints(matchIndexSlice)
-	middleElement := len(matchIndexSlice) / 2
-	candidateIndex := matchIndexSlice[middleElement]
-	for i := candidateIndex; i > rf.commitIndex; i = i - 1 {
-		if rf.logContents[i-1].Term == currentTerm || replicatedToAllNodes(i, matchIndexSlice) {
-			rf.commitIndex = i
-			rf.ApplyToStateMachine()
-			rf.Log("successfully updated leader commit index to %d and applied to state machine", rf.commitIndex)
-			return
+	if rf.IsLeader() {
+		rf.mu.Lock()
+		defer rf.mu.Unlock()
+		currentTerm := rf.currentTerm
+		matchIndexSlice := rf.MatchIndexCopy()
+		sort.Ints(matchIndexSlice)
+		middleElement := len(matchIndexSlice) / 2
+		candidateIndex := matchIndexSlice[middleElement]
+		for i := candidateIndex; i > rf.commitIndex; i = i - 1 {
+			if rf.logContents[i-1].Term == currentTerm {
+				rf.commitIndex = i
+				rf.ApplyToStateMachine()
+				rf.Log("successfully updated leader commit index to %d and applied to state machine", rf.commitIndex)
+				return
+			}
 		}
 	}
 }
@@ -207,11 +209,15 @@ func (rf *logReplicationState) MatchIndex(forPeer int) int {
 func (rf *logReplicationState) SetMatchIndex(peerIndex int, value int) {
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
-	rf.matchIndex[peerIndex] = value
+	if value > rf.matchIndex[peerIndex] {
+		rf.matchIndex[peerIndex] = value
+	}
 }
 
 func (rf *logReplicationState) SetNextIndex(peerIndex int, value int) {
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
-	rf.nextIndex[peerIndex] = value
+	if value > rf.nextIndex[peerIndex] {
+		rf.nextIndex[peerIndex] = value
+	}
 }
